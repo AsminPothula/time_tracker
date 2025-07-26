@@ -1,28 +1,36 @@
 import React, { useState, useEffect, createContext, useContext, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth'; // Removed signInAnonymously
-import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, getDocs } from 'firebase/firestore';
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, getDocs, setDoc, getDoc } from 'firebase/firestore';
 
 // Create a context for Firebase and user data
 const AppContext = createContext(null);
+
+// ✅ FIX: Local date helper to prevent off-by-one date issue
+const getLocalDateString = (dateObj = new Date()) => {
+  const year = dateObj.getFullYear();
+  const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
+  const day = dateObj.getDate().toString().padStart(2, '0');
+  return `${month}-${day}-${year}`;
+};
 
 // Main App Component
 const App = () => {
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
   const [userId, setUserId] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [currentView, setCurrentView] = useState('projects'); // 'projects' or 'detail'
+  const [currentView, setCurrentView] = useState('projects');
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [projects, setProjects] = useState([]);
+  const [allTimeEntries, setAllTimeEntries] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [modalMessage, setModalMessage] = useState('');
   const [modalConfirmAction, setModalConfirmAction] = useState(null);
 
   // Firebase Initialization and Authentication
   useEffect(() => {
-    // Firebase Configuration loaded from environment variables
-    // IMPORTANT: These variables must be prefixed with REACT_APP_ in your .env file
     const firebaseConfig = {
       apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
       authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
@@ -33,7 +41,6 @@ const App = () => {
       measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID,
     };
 
-    // Basic validation for Firebase config
     if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
       console.error("Firebase configuration is missing. Please check your .env file.");
       setModalMessage("Application configuration error. Please ensure Firebase environment variables are set up correctly.");
@@ -49,34 +56,37 @@ const App = () => {
       setDb(firestore);
       setAuth(firebaseAuth);
 
-      // Listen for auth state changes
-      const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
+      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
         if (user) {
-          // A user is logged in (via email/password or other explicit method)
           setUserId(user.uid);
+          const userProfileDocRef = doc(firestore, `artifacts/${app.options.projectId}/users/${user.uid}/profile/data`);
+          const userProfileSnap = await getDoc(userProfileDocRef);
+          if (userProfileSnap.exists()) {
+            setUserProfile(userProfileSnap.data());
+          } else {
+            setUserProfile({ firstName: '', lastName: '', photoURL: '', email: user.email });
+            await setDoc(userProfileDocRef, { firstName: '', lastName: '', photoURL: '', email: user.email }, { merge: true });
+          }
         } else {
-          // No user is logged in. User must explicitly sign in.
           setUserId(null);
+          setUserProfile(null);
         }
         setIsAuthReady(true);
       });
 
-      return () => unsubscribe(); // Cleanup auth listener on component unmount
+      return () => unsubscribe();
     } catch (error) {
       console.error("Error initializing Firebase:", error);
       setModalMessage(`Error initializing application: ${error.message}. Please check console for details.`);
       setShowModal(true);
     }
-  }, []); // Empty dependency array means this effect runs once on component mount
+  }, []);
 
-  // Fetch projects when auth and db are ready
+  // Fetch projects and time entries
   useEffect(() => {
     if (db && userId && isAuthReady) {
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
-      // db.app.options.projectId correctly references the projectId from your firebaseConfig
       const projectsCollectionRef = collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/projects`);
-      // Using onSnapshot for real-time updates
-      const unsubscribe = onSnapshot(projectsCollectionRef, (snapshot) => {
+      const unsubscribeProjects = onSnapshot(projectsCollectionRef, (snapshot) => {
         const fetchedProjects = snapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
@@ -84,21 +94,36 @@ const App = () => {
         setProjects(fetchedProjects);
       }, (error) => {
         console.error("Error fetching projects:", error);
-        setModalMessage("Error loading projects. Please refresh the page.");
-        setShowModal(true);
+        showCustomModal("Error loading projects. Please refresh the page.");
       });
-      return () => unsubscribe(); // Cleanup listener
-    }
-  }, [db, userId, isAuthReady]); // Dependencies ensure this runs when db, userId, or auth state changes
 
-  // Function to show a custom modal message (wrapped in useCallback for stability)
+      const timeEntriesCollectionRef = collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/timeEntries`);
+      const unsubscribeTimeEntries = onSnapshot(timeEntriesCollectionRef, (snapshot) => {
+        const fetchedEntries = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          clockInTime: doc.data().clockInTime ? new Date(doc.data().clockInTime) : null,
+          clockOutTime: doc.data().clockOutTime ? new Date(doc.data().clockOutTime) : null,
+        }));
+        setAllTimeEntries(fetchedEntries);
+      }, (error) => {
+        console.error("Error fetching all time entries:", error);
+        showCustomModal("Error loading all time entries.");
+      });
+
+      return () => {
+        unsubscribeProjects();
+        unsubscribeTimeEntries();
+      };
+    }
+  }, [db, userId, isAuthReady]);
+
   const showCustomModal = useCallback((message, confirmAction = null) => {
     setModalMessage(message);
-    setModalConfirmAction(() => confirmAction); // Store the action to be executed on confirm
+    setModalConfirmAction(() => confirmAction);
     setShowModal(true);
-  }, [setModalMessage, setModalConfirmAction, setShowModal]); // Dependencies for useCallback
+  }, [setModalMessage, setModalConfirmAction, setShowModal]);
 
-  // Function to handle modal confirmation
   const handleModalConfirm = () => {
     if (modalConfirmAction) {
       modalConfirmAction();
@@ -107,23 +132,24 @@ const App = () => {
     setModalConfirmAction(null);
   };
 
-  // Function to handle modal close (cancel)
   const handleModalClose = () => {
     setShowModal(false);
     setModalConfirmAction(null);
   };
 
-  // Context value
   const contextValue = {
     db,
     auth,
     userId,
+    userProfile,
+    setUserProfile,
     isAuthReady,
     showCustomModal,
     setCurrentView,
     setSelectedProjectId,
     projects,
     setProjects,
+    allTimeEntries,
   };
 
   if (!isAuthReady) {
@@ -139,26 +165,29 @@ const App = () => {
       <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 font-inter">
         <header className="bg-white dark:bg-gray-800 shadow-md p-4 flex justify-between items-center">
           <h1 className="text-3xl font-bold text-blue-600 dark:text-blue-400">Time Tracker</h1>
-          {/* Only show User ID and Sign Out button if a user is authenticated (not null) */}
-          {auth && auth.currentUser && ( // Check auth.currentUser to ensure a user is truly logged in
-            <div className="flex items-center space-x-4">
-                <div className="text-sm text-gray-600 dark:text-gray-400">
-                    User ID: <span className="font-mono bg-gray-200 dark:bg-gray-700 p-1 rounded">{auth.currentUser.uid}</span>
-                </div>
-                <button
-                    onClick={() => signOut(auth).catch(e => showCustomModal(`Sign out failed: ${e.message}`))}
-                    className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 text-sm"
-                >
-                    Sign Out
-                </button>
-            </div>
+          {auth && auth.currentUser && (
+            <button
+                onClick={() => signOut(auth).catch(e => showCustomModal(`Sign out failed: ${e.message}`))}
+                className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 text-sm"
+            >
+                Sign Out
+            </button>
           )}
         </header>
 
         <main className="container mx-auto p-4">
-          {auth && auth.currentUser ? ( // Check auth.currentUser to ensure a user is truly logged in
+          {auth && auth.currentUser ? (
             <>
-              {currentView === 'projects' && <ProjectList />}
+              {currentView === 'projects' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2">
+                    <ProjectList />
+                  </div>
+                  <div className="lg:col-span-1">
+                    <ProfileSection />
+                  </div>
+                </div>
+              )}
               {currentView === 'detail' && selectedProjectId && <ProjectDetail projectId={selectedProjectId} />}
             </>
           ) : (
@@ -166,7 +195,6 @@ const App = () => {
           )}
         </main>
 
-        {/* Custom Modal Component */}
         {showModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm w-full">
@@ -197,20 +225,25 @@ const App = () => {
   );
 };
 
-// AuthScreen Component for Login/Signup
 const AuthScreen = () => {
-  const { auth, showCustomModal } = useContext(AppContext);
+  const { auth, showCustomModal, db, setUserProfile } = useContext(AppContext);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isLoginMode, setIsLoginMode] = useState(true); // true for login, false for signup
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [isLoginMode, setIsLoginMode] = useState(true);
 
   const handleAuthAction = async () => {
-    if (!auth) {
-      showCustomModal("Authentication service not ready. Please wait.");
+    if (!auth || !db) {
+      showCustomModal("Authentication or Database service not ready. Please wait.");
       return;
     }
     if (!email || !password) {
       showCustomModal("Email and password cannot be empty.");
+      return;
+    }
+    if (!isLoginMode && (!firstName.trim() || !lastName.trim())) {
+      showCustomModal("First Name and Last Name cannot be empty for sign up.");
       return;
     }
 
@@ -219,7 +252,19 @@ const AuthScreen = () => {
         await signInWithEmailAndPassword(auth, email, password);
         showCustomModal("Logged in successfully!");
       } else {
-        await createUserWithEmailAndPassword(auth, email, password);
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+
+        const userProfileDocRef = doc(db, `artifacts/${db.app.options.projectId}/users/${user.uid}/profile/data`);
+        const profileData = {
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          email: user.email,
+          photoURL: '',
+        };
+        await setDoc(userProfileDocRef, profileData, { merge: true });
+        setUserProfile(profileData);
+
         showCustomModal("Account created and logged in successfully!");
       }
     } catch (error) {
@@ -250,11 +295,50 @@ const AuthScreen = () => {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-[calc(100vh-160px)]"> {/* Adjusted height to fit */}
+    <div className="flex items-center justify-center min-h-[calc(100vh-160px)]">
       <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl max-w-md w-full">
+        <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900 rounded-md border border-blue-200 dark:border-blue-700 text-blue-800 dark:text-blue-200">
+          <p className="space-y-2">
+            <span className="block"><span className="font-semibold">Be Your Own Boss of Time</span> – Clock in, clock out, and flex on your to-do list like a legend.</span>
+            <span className="block"><span className="font-semibold">Projects? Chores? World Domination?</span> – Track it all. One app, endless slayage.</span>
+            <span className="block"><span className="font-semibold">Consistency = Power</span> – Watch your hours add up and feel that productivity glow-up.</span>
+          </p>
+        </div>
+
         <h2 className="text-3xl font-bold text-center text-blue-600 dark:text-blue-400 mb-6">
           {isLoginMode ? 'Login' : 'Sign Up'}
         </h2>
+
+        {!isLoginMode && (
+          <>
+            <div className="mb-4">
+              <label htmlFor="firstName" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-2">
+                First Name:
+              </label>
+              <input
+                type="text"
+                id="firstName"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                className="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 dark:text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-blue-500"
+                placeholder="John"
+              />
+            </div>
+            <div className="mb-4">
+              <label htmlFor="lastName" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-2">
+                Last Name:
+              </label>
+              <input
+                type="text"
+                id="lastName"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                className="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 dark:text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-blue-500"
+                placeholder="Doe"
+              />
+            </div>
+          </>
+        )}
 
         <div className="mb-4">
           <label htmlFor="email" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-2">
@@ -303,14 +387,246 @@ const AuthScreen = () => {
   );
 };
 
-// ProjectList Component
+const ProfileSection = () => {
+  const { db, userId, userProfile, setUserProfile, showCustomModal, allTimeEntries } = useContext(AppContext);
+  const [editingPhotoUrl, setEditingPhotoUrl] = useState('');
+  const [showPhotoEditModal, setShowPhotoEditModal] = useState(false);
+
+  const calculateDailyTotalAllProjects = (dateString) => {
+    const entriesForDay = allTimeEntries.filter((entry) => entry.date === dateString);
+    return entriesForDay.reduce((sum, entry) => {
+      if (entry.clockInTime && entry.clockOutTime) {
+        return sum + (entry.clockOutTime.getTime() - entry.clockInTime.getTime());
+      }
+      return sum;
+    }, 0);
+  };
+
+  const calculateWeeklyTotalsAllProjects = () => {
+    const weeklyData = {};
+    allTimeEntries.forEach((entry) => {
+      if (entry.clockInTime && entry.clockOutTime) {
+        const entryDate = new Date(entry.clockInTime);
+        const dayOfWeek = (entryDate.getDay() + 6) % 7; // Monday as first day
+        const startOfWeek = new Date(entryDate);
+        startOfWeek.setDate(entryDate.getDate() - dayOfWeek);
+        startOfWeek.setHours(0, 0, 0, 0);
+        const weekKey = startOfWeek.toISOString().split('T')[0];
+
+        if (!weeklyData[weekKey]) {
+          weeklyData[weekKey] = 0;
+        }
+        weeklyData[weekKey] += entry.clockOutTime.getTime() - entry.clockInTime.getTime();
+      }
+    });
+    return Object.keys(weeklyData)
+      .map((weekKey) => ({
+        week: weekKey,
+        totalDurationMs: weeklyData[weekKey],
+      }))
+      .sort((a, b) => new Date(b.week) - new Date(a.week));
+  };
+
+  const calculateMonthlyTotalsAllProjects = () => {
+    const monthlyData = {};
+    allTimeEntries.forEach((entry) => {
+      if (entry.clockInTime && entry.clockOutTime) {
+        const entryDate = new Date(entry.clockInTime);
+        const monthKey = `${entryDate.getFullYear()}-${(entryDate.getMonth() + 1)
+          .toString()
+          .padStart(2, '0')}`;
+        if (!monthlyData[monthKey]) {
+          monthlyData[monthKey] = 0;
+        }
+        monthlyData[monthKey] += entry.clockOutTime.getTime() - entry.clockInTime.getTime();
+      }
+    });
+    return Object.keys(monthlyData)
+      .map((monthKey) => ({
+        month: monthKey,
+        totalDurationMs: monthlyData[monthKey],
+      }))
+      .sort((a, b) => new Date(b.month) - new Date(a.month));
+  };
+
+  const formatDuration = (ms) => {
+    if (ms < 0) return 'N/A';
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    const remainingSeconds = seconds % 60;
+    return `${hours}h ${remainingMinutes}m ${remainingSeconds}s`;
+  };
+
+  const today = getLocalDateString();
+  const todayTotal = calculateDailyTotalAllProjects(today);
+
+  // ✅ FIX: Only show current week/month, 0 for previous
+  const startOfCurrentWeek = new Date();
+  const dayOfWeek = (startOfCurrentWeek.getDay() + 6) % 7;
+  startOfCurrentWeek.setDate(startOfCurrentWeek.getDate() - dayOfWeek);
+  startOfCurrentWeek.setHours(0, 0, 0, 0);
+  const currentWeekKey = startOfCurrentWeek.toISOString().split('T')[0];
+
+  const weeklyTotals = calculateWeeklyTotalsAllProjects();
+  const monthlyTotals = calculateMonthlyTotalsAllProjects();
+
+  const currentWeekTotal =
+    weeklyTotals.find((w) => w.week === currentWeekKey)?.totalDurationMs || 0;
+
+  const currentMonthKey = `${new Date().getFullYear()}-${(new Date().getMonth() + 1)
+    .toString()
+    .padStart(2, '0')}`;
+  const currentMonthTotal =
+    monthlyTotals.find((m) => m.month === currentMonthKey)?.totalDurationMs || 0;
+
+  const handleSavePhoto = async () => {
+    if (!db || !userId || !userProfile) {
+      showCustomModal('Database or user profile not ready.');
+      return;
+    }
+    try {
+      const userProfileDocRef = doc(db, `artifacts/${db.app.options.projectId}/users/${userId}/profile/data`);
+      const newPhotoURL = editingPhotoUrl.trim().includes('?')
+        ? `${editingPhotoUrl.trim()}&_cachebuster=${Date.now()}`
+        : `${editingPhotoUrl.trim()}?_cachebuster=${Date.now()}`;
+
+      await updateDoc(userProfileDocRef, { photoURL: newPhotoURL });
+      setUserProfile((prev) => ({ ...prev, photoURL: newPhotoURL })); // ✅ force update
+      showCustomModal('Profile photo updated successfully!');
+      setShowPhotoEditModal(false);
+    } catch (e) {
+      console.error('Error updating photo URL:', e);
+      showCustomModal('Failed to update photo. Please try again.');
+    }
+  };
+
+  return (
+    <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+      <h2 className="text-2xl font-semibold mb-6 text-blue-600 dark:text-blue-400">Your Profile</h2>
+
+      <div className="flex flex-col items-center mb-6">
+        <div className="relative w-24 h-24 mb-3">
+          <img
+            key={userProfile?.photoURL} // ✅ ensures re-render after save
+            src={
+              userProfile?.photoURL ||
+              'https://placehold.co/96x96/cccccc/333333?text=User'
+            }
+            alt="User Profile"
+            className="w-24 h-24 rounded-full border-2 border-blue-500 dark:border-blue-400 object-cover"
+            onError={(e) => {
+              e.target.onerror = null;
+              e.target.src =
+                'https://placehold.co/96x96/cccccc/333333?text=User';
+            }}
+          />
+          <button
+            onClick={() => {
+              setEditingPhotoUrl(userProfile?.photoURL || '');
+              setShowPhotoEditModal(true);
+            }}
+            className="absolute -bottom-0 right-0 p-1 bg-blue-600 rounded-full text-white hover:bg-blue-700 transition-colors duration-200 shadow-md"
+            title="Change Photo"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-4 w-4"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path d="M3 17.25V21h3.75l11-11.03a1 1 0 0 0 0-1.41l-2.3-2.3a1 1 0 0 0-1.41 0l-11.04 11zM14.75 7.04l2.21 2.21"/>
+            </svg>
+          </button>
+        </div>
+
+        <p className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+          {userProfile?.firstName} {userProfile?.lastName}
+        </p>
+        <p className="text-gray-600 dark:text-gray-400 text-sm">
+          {userProfile?.email}
+        </p>
+        <p className="text-gray-600 dark:text-gray-400 text-xs font-mono bg-gray-200 dark:bg-gray-700 p-1 rounded mt-2">
+          User ID: {userId}
+        </p>
+      </div>
+
+      <div className="space-y-2 p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
+        <h3 className="text-lg font-medium mb-2 text-gray-800 dark:text-gray-200">
+          All Projects Totals
+        </h3>
+        <ul className="divide-y divide-gray-200 dark:divide-gray-600">
+          <li className="py-2 flex justify-between items-center text-gray-700 dark:text-gray-300">
+            <span className="font-semibold">Today's Total:</span>
+            <span className="font-bold text-blue-600 dark:text-blue-400">
+              {formatDuration(todayTotal)}
+            </span>
+          </li>
+          <li className="py-2 flex justify-between items-center text-gray-700 dark:text-gray-300">
+            <span className="font-semibold">This Week's Total:</span>
+            <span className="font-bold text-blue-600 dark:text-blue-400">
+              {formatDuration(currentWeekTotal)}
+            </span>
+          </li>
+          <li className="py-2 flex justify-between items-center text-gray-700 dark:text-gray-300">
+            <span className="font-semibold">This Month's Total:</span>
+            <span className="font-bold text-blue-600 dark:text-blue-400">
+              {formatDuration(currentMonthTotal)}
+            </span>
+          </li>
+        </ul>
+      </div>
+
+      {showPhotoEditModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm w-full">
+            <h3 className="text-2xl font-bold text-blue-600 dark:text-blue-400 mb-4">
+              Change Profile Photo
+            </h3>
+            <div className="mb-4">
+              <label
+                htmlFor="photoUrl"
+                className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-2"
+              >
+                Photo URL:
+              </label>
+              <input
+                type="url"
+                id="photoUrl"
+                value={editingPhotoUrl}
+                onChange={(e) => setEditingPhotoUrl(e.target.value)}
+                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-blue-500"
+                placeholder="https://example.com/your-photo.jpg"
+              />
+            </div>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={handleSavePhoto}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+              >
+                Save Photo
+              </button>
+              <button
+                onClick={() => setShowPhotoEditModal(false)}
+                className="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ProjectList = () => {
   const { db, userId, showCustomModal, setCurrentView, setSelectedProjectId, projects, setProjects } = useContext(AppContext);
   const [newProjectName, setNewProjectName] = useState('');
   const [editingProjectId, setEditingProjectId] = useState(null);
   const [editingProjectName, setEditingProjectName] = useState('');
 
-  // Function to add a new project
   const addProject = async () => {
     if (!newProjectName.trim()) {
       showCustomModal("Project name cannot be empty.");
@@ -322,7 +638,6 @@ const ProjectList = () => {
     }
 
     try {
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
       const projectsCollectionRef = collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/projects`);
       await addDoc(projectsCollectionRef, {
         name: newProjectName.trim(),
@@ -336,13 +651,11 @@ const ProjectList = () => {
     }
   };
 
-  // Function to start editing a project
   const startEditingProject = (project) => {
     setEditingProjectId(project.id);
     setEditingProjectName(project.name);
   };
 
-  // Function to update a project
   const updateProject = async (projectId) => {
     if (!editingProjectName.trim()) {
       showCustomModal("Project name cannot be empty.");
@@ -354,7 +667,6 @@ const ProjectList = () => {
     }
 
     try {
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
       const projectDocRef = doc(db, `artifacts/${db.app.options.projectId}/users/${userId}/projects`, projectId);
       await updateDoc(projectDocRef, {
         name: editingProjectName.trim(),
@@ -368,7 +680,6 @@ const ProjectList = () => {
     }
   };
 
-  // Function to delete a project
   const deleteProject = async (projectId) => {
     if (!db || !userId) {
       showCustomModal("Database not ready. Please wait.");
@@ -377,20 +688,16 @@ const ProjectList = () => {
 
     showCustomModal("Are you sure you want to delete this project? All associated time entries will also be deleted.", async () => {
       try {
-        // Delete time entries first
-        // Use the actual projectId from the initialized Firebase app for the Firestore path
         const timeEntriesQuery = query(collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/timeEntries`));
         const snapshot = await getDocs(timeEntriesQuery);
-        const batch = db.batch(); // Use a batch for multiple deletes
+        const batch = db.batch();
         snapshot.docs.forEach(doc => {
-          if (doc.data().projectId === projectId) { // Filter by projectId
+          if (doc.data().projectId === projectId) {
             batch.delete(doc.ref);
           }
         });
         await batch.commit();
 
-        // Then delete the project itself
-        // Use the actual projectId from the initialized Firebase app for the Firestore path
         const projectDocRef = doc(db, `artifacts/${db.app.options.projectId}/users/${userId}/projects`, projectId);
         await deleteDoc(projectDocRef);
 
@@ -406,7 +713,6 @@ const ProjectList = () => {
     <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
       <h2 className="text-2xl font-semibold mb-6 text-blue-600 dark:text-blue-400">Your Projects</h2>
 
-      {/* Add New Project */}
       <div className="mb-8 p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
         <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Create New Project</h3>
         <div className="flex flex-col sm:flex-row gap-3">
@@ -426,7 +732,6 @@ const ProjectList = () => {
         </div>
       </div>
 
-      {/* Project List */}
       <div>
         {projects.length === 0 ? (
           <p className="text-center text-gray-500 dark:text-gray-400">No projects yet. Create one above!</p>
@@ -497,34 +802,35 @@ const ProjectList = () => {
   );
 };
 
-// ProjectDetail Component (Placeholder for now, will be implemented next)
 const ProjectDetail = ({ projectId }) => {
-  const { db, userId, showCustomModal, setCurrentView } = useContext(AppContext);
+  const { db, userId, showCustomModal, setCurrentView, allTimeEntries } = useContext(AppContext);
   const [projectName, setProjectName] = useState('');
-  const [timeEntries, setTimeEntries] = useState([]);
+  const [filteredTimeEntries, setFilteredTimeEntries] = useState([]);
   const [clockedIn, setClockedIn] = useState(false);
   const [currentEntryId, setCurrentEntryId] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(new Date());
+  const [selectedFilterDate, setSelectedFilterDate] = useState(null);
 
-  // New state for editing time entries
   const [showEditTimeEntryModal, setShowEditTimeEntryModal] = useState(false);
   const [editingTimeEntryId, setEditingTimeEntryId] = useState(null);
   const [editingTimeEntryClockIn, setEditingTimeEntryClockIn] = useState('');
   const [editingTimeEntryClockOut, setEditingTimeEntryClockOut] = useState('');
+  const [editingTimeEntryNotes, setEditingTimeEntryNotes] = useState('');
 
-  // Helper to format Date objects to 'YYYY-MM-DDTHH:MM' for datetime-local input
   const formatDateTimeLocal = (date) => {
     if (!date) return '';
     const dt = new Date(date);
-    dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset()); // Adjust for timezone
-    return dt.toISOString().slice(0, 16);
+    const year = dt.getFullYear();
+    const month = (dt.getMonth() + 1).toString().padStart(2, '0');
+    const day = dt.getDate().toString().padStart(2, '0');
+    const hours = dt.getHours().toString().padStart(2, '0');
+    const minutes = dt.getMinutes().toString().padStart(2, '0');
+    const seconds = dt.getSeconds().toString().padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
   };
 
-  // Fetch project name and time entries
   useEffect(() => {
     if (db && userId && projectId) {
-      // Fetch project name
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
       const projectDocRef = doc(db, `artifacts/${db.app.options.projectId}/users/${userId}/projects`, projectId);
       const unsubscribeProject = onSnapshot(projectDocRef, (docSnap) => {
         if (docSnap.exists()) {
@@ -534,51 +840,34 @@ const ProjectDetail = ({ projectId }) => {
           showCustomModal("Project not found. Returning to project list.");
           setCurrentView('projects');
         }
-      }, (error) => {
-        console.error("Error fetching project name:", error);
-        showCustomModal("Error fetching project details.");
       });
-
-      // Fetch time entries for this project
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
-      const q = query(
-        collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/timeEntries`),
-        // orderBy('clockInTime', 'desc') // Sorting will be done client-side for now
-      );
-      const unsubscribeEntries = onSnapshot(q, (snapshot) => {
-        const fetchedEntries = snapshot.docs
-          .map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-            // Convert Firestore Timestamps to Date objects if they exist
-            clockInTime: doc.data().clockInTime ? new Date(doc.data().clockInTime) : null,
-            clockOutTime: doc.data().clockOutTime ? new Date(doc.data().clockOutTime) : null,
-          }))
-          .filter(entry => entry.projectId === projectId) // Filter client-side
-          .sort((a, b) => b.clockInTime - a.clockInTime); // Sort by clockInTime descending
-
-        setTimeEntries(fetchedEntries);
-
-        // Check if currently clocked in
-        const lastEntry = fetchedEntries.find(entry => !entry.clockOutTime);
-        if (lastEntry) {
-          setClockedIn(true);
-          setCurrentEntryId(lastEntry.id);
-        } else {
-          setClockedIn(false);
-          setCurrentEntryId(null);
-        }
-      }, (error) => {
-        console.error("Error fetching time entries:", error);
-        showCustomModal("Error loading time entries.");
-      });
-
-      return () => {
-        unsubscribeProject();
-        unsubscribeEntries();
-      };
+      return () => unsubscribeProject();
     }
   }, [db, userId, projectId, setCurrentView, showCustomModal]);
+
+  useEffect(() => {
+    const projectSpecificEntries = allTimeEntries.filter((entry) => entry.projectId === projectId);
+    // ✅ Default to today's date if no filter is set
+    if (!selectedFilterDate) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      setSelectedFilterDate(getLocalDateString(today));
+    }
+    const filtered = selectedFilterDate
+      ? projectSpecificEntries.filter((entry) => entry.date === selectedFilterDate)
+      : projectSpecificEntries;
+
+    setFilteredTimeEntries(filtered.sort((a, b) => b.clockInTime - a.clockInTime));
+    const lastEntryForThisProject = projectSpecificEntries.find((entry) => !entry.clockOutTime);
+    if (lastEntryForThisProject) {
+      setClockedIn(true);
+      setCurrentEntryId(lastEntryForThisProject.id);
+    } else {
+      setClockedIn(false);
+      setCurrentEntryId(null);
+    }
+  }, [allTimeEntries, projectId, selectedFilterDate]);
+
 
   const handleClockIn = async () => {
     if (!db || !userId) {
@@ -591,13 +880,16 @@ const ProjectDetail = ({ projectId }) => {
     }
 
     try {
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
-      const newEntryRef = await addDoc(collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/timeEntries`), {
-        projectId: projectId,
-        clockInTime: new Date().toISOString(), // Store as ISO string
-        date: new Date().toISOString().split('T')[0], // YYYY-MM-DD format for easy grouping
-        clockOutTime: null,
-      });
+      const newEntryRef = await addDoc(
+        collection(db, `artifacts/${db.app.options.projectId}/users/${userId}/timeEntries`),
+        {
+          projectId: projectId,
+          clockInTime: new Date().toISOString(),
+          date: getLocalDateString(),
+          clockOutTime: null,
+          notes: '',
+        }
+      );
       setCurrentEntryId(newEntryRef.id);
       setClockedIn(true);
       showCustomModal("Clocked in successfully!");
@@ -618,10 +910,9 @@ const ProjectDetail = ({ projectId }) => {
     }
 
     try {
-      // Use the actual projectId from the initialized Firebase app for the Firestore path
       const entryDocRef = doc(db, `artifacts/${db.app.options.projectId}/users/${userId}/timeEntries`, currentEntryId);
       await updateDoc(entryDocRef, {
-        clockOutTime: new Date().toISOString(), // Store as ISO string
+        clockOutTime: new Date().toISOString(),
       });
       setClockedIn(false);
       setCurrentEntryId(null);
@@ -632,7 +923,6 @@ const ProjectDetail = ({ projectId }) => {
     }
   };
 
-  // Function to delete a time entry
   const deleteTimeEntry = async (entryId) => {
     showCustomModal("Are you sure you want to delete this time entry?", async () => {
       if (!db || !userId) {
@@ -650,15 +940,14 @@ const ProjectDetail = ({ projectId }) => {
     });
   };
 
-  // Function to start editing a time entry
   const startEditingTimeEntry = (entry) => {
     setEditingTimeEntryId(entry.id);
     setEditingTimeEntryClockIn(formatDateTimeLocal(entry.clockInTime));
     setEditingTimeEntryClockOut(formatDateTimeLocal(entry.clockOutTime));
+    setEditingTimeEntryNotes(entry.notes || '');
     setShowEditTimeEntryModal(true);
   };
 
-  // Function to handle updating a time entry
   const handleUpdateTimeEntry = async () => {
     if (!db || !userId || !editingTimeEntryId) {
       showCustomModal("Database or entry not ready for update.");
@@ -682,12 +971,14 @@ const ProjectDetail = ({ projectId }) => {
       await updateDoc(entryDocRef, {
         clockInTime: newClockInDate.toISOString(),
         clockOutTime: newClockOutDate ? newClockOutDate.toISOString() : null,
-        date: newClockInDate.toISOString().split('T')[0], // Update date if clock-in time changes day
+        date: getLocalDateString(newClockInDate),
+        notes: editingTimeEntryNotes.trim(),
       });
       setShowEditTimeEntryModal(false);
       setEditingTimeEntryId(null);
       setEditingTimeEntryClockIn('');
       setEditingTimeEntryClockOut('');
+      setEditingTimeEntryNotes('');
       showCustomModal("Time entry updated successfully!");
     } catch (e) {
       console.error("Error updating time entry: ", e);
@@ -695,7 +986,6 @@ const ProjectDetail = ({ projectId }) => {
     }
   };
 
-  // Helper to format duration
   const formatDuration = (ms) => {
     if (ms < 0) return "N/A";
     const seconds = Math.floor(ms / 1000);
@@ -706,7 +996,6 @@ const ProjectDetail = ({ projectId }) => {
     return `${hours}h ${remainingMinutes}m ${remainingSeconds}s`;
   };
 
-  // Calculate total duration for an entry
   const calculateEntryDuration = (entry) => {
     if (entry.clockInTime && entry.clockOutTime) {
       return entry.clockOutTime.getTime() - entry.clockInTime.getTime();
@@ -714,9 +1003,8 @@ const ProjectDetail = ({ projectId }) => {
     return 0;
   };
 
-  // Group entries by day for display
-  const groupedEntries = timeEntries.reduce((acc, entry) => {
-    const dateKey = entry.date; // YYYY-MM-DD
+  const groupedEntries = filteredTimeEntries.reduce((acc, entry) => {
+    const dateKey = getLocalDateString(entry.clockInTime);
     if (!acc[dateKey]) {
       acc[dateKey] = [];
     }
@@ -724,109 +1012,122 @@ const ProjectDetail = ({ projectId }) => {
     return acc;
   }, {});
 
-  // Calculate daily totals
   const dailyTotals = Object.keys(groupedEntries).map(dateKey => {
     const entriesForDay = groupedEntries[dateKey];
     const totalDurationMs = entriesForDay.reduce((sum, entry) => sum + calculateEntryDuration(entry), 0);
     return { date: dateKey, totalDurationMs };
-  }).sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort by date descending
+  }).sort((a, b) => new Date(b.date) - new Date(a.date));
 
-  // Calendar logic (simplified for now)
-  const getDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
-  const getFirstDayOfMonth = (year, month) => new Date(year, month, 1).getDay(); // 0 for Sunday, 1 for Monday
-
-  const year = selectedDate.getFullYear();
-  const month = selectedDate.getMonth();
-  const daysInMonth = getDaysInMonth(year, month);
-  const firstDay = getFirstDayOfMonth(year, month); // Day of the week for the 1st of the month
+  const year = selectedCalendarDate.getFullYear();
+  const month = selectedCalendarDate.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstDay = (new Date(year, month, 1).getDay() + 6) % 7;
 
   const calendarDays = [];
-  // Add empty placeholders for days before the 1st of the month
   for (let i = 0; i < firstDay; i++) {
     calendarDays.push(null);
   }
-  // Add actual days
   for (let i = 1; i <= daysInMonth; i++) {
     calendarDays.push(i);
   }
 
-  // Calculate weekly totals
-  const calculateWeeklyTotals = () => {
-    const weeklyData = {};
-    timeEntries.forEach(entry => {
-      if (entry.clockInTime && entry.clockOutTime) {
-        const entryDate = new Date(entry.clockInTime);
-        const startOfWeek = new Date(entryDate);
-        startOfWeek.setDate(entryDate.getDate() - entryDate.getDay()); // Sunday as start of week
-        startOfWeek.setHours(0, 0, 0, 0);
-        const weekKey = startOfWeek.toISOString().split('T')[0]; // Use start of week as key
-
-        if (!weeklyData[weekKey]) {
-          weeklyData[weekKey] = 0;
-        }
-        weeklyData[weekKey] += calculateEntryDuration(entry);
-      }
-    });
-
-    return Object.keys(weeklyData).map(weekKey => ({
-      week: weekKey,
-      totalDurationMs: weeklyData[weekKey],
-    })).sort((a, b) => new Date(b.week) - new Date(a.week));
+  // ✅ FIX 1: Correct date selection
+  const handleDateClick = (day) => {
+    if (!day) return; // ignore empty slots
+    const clickedDate = new Date(year, month, day);
+    clickedDate.setHours(0, 0, 0, 0);
+    const newDateString = getLocalDateString(clickedDate);
+    // ✅ Always set, even if the same date is clicked again
+    setSelectedFilterDate(newDateString);
   };
 
-  const weeklyTotals = calculateWeeklyTotals();
-
-  // Calculate monthly totals
-  const calculateMonthlyTotals = () => {
-    const monthlyData = {};
-    timeEntries.forEach(entry => {
-      if (entry.clockInTime && entry.clockOutTime) {
-        const entryDate = new Date(entry.clockInTime);
-        const monthKey = `${entryDate.getFullYear()}-${(entryDate.getMonth() + 1).toString().padStart(2, '0')}`; // YYYY-MM
-        if (!monthlyData[monthKey]) {
-          monthlyData[monthKey] = 0;
-        }
-        monthlyData[monthKey] += calculateEntryDuration(entry);
-      }
-    });
-    return Object.keys(monthlyData).map(monthKey => ({
-      month: monthKey,
-      totalDurationMs: monthlyData[monthKey],
-    })).sort((a, b) => new Date(b.month) - new Date(a.month));
-  };
-
-  const monthlyTotals = calculateMonthlyTotals();
-
-  const goToPreviousMonth = () => {
-    setSelectedDate(prevDate => {
+  const goToPreviousMonth = useCallback(() => {
+    setSelectedCalendarDate(prevDate => {
       const newDate = new Date(prevDate);
       newDate.setMonth(newDate.getMonth() - 1);
       return newDate;
     });
-  };
+    setSelectedFilterDate(null);
+  }, []);
 
-  const goToNextMonth = () => {
-    setSelectedDate(prevDate => {
+  const goToNextMonth = useCallback(() => {
+    setSelectedCalendarDate(prevDate => {
       const newDate = new Date(prevDate);
       newDate.setMonth(newDate.getMonth() + 1);
       return newDate;
     });
-  };
+    setSelectedFilterDate(null);
+  }, []);
 
+  // ✅ FIX 2: Weekly total based on selectedFilterDate (if present)
+  const getSelectedWeekTotal = useCallback(() => {
+    const referenceDate = selectedFilterDate
+      ? new Date(selectedFilterDate)
+      : selectedCalendarDate;
+
+    const dayOfWeek = (referenceDate.getDay() + 6) % 7;
+    const startOfWeek = new Date(referenceDate);
+    startOfWeek.setDate(referenceDate.getDate() - dayOfWeek);
+    startOfWeek.setHours(0, 0, 0, 0);
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 7);
+
+    return allTimeEntries
+      .filter((entry) => entry.projectId === projectId)
+      .reduce((sum, entry) => {
+        if (entry.clockInTime && entry.clockOutTime) {
+          const entryTime = entry.clockInTime.getTime();
+          if (entryTime >= startOfWeek.getTime() && entryTime < endOfWeek.getTime()) {
+            return sum + (entry.clockOutTime.getTime() - entry.clockInTime.getTime());
+          }
+        }
+        return sum;
+      }, 0);
+  }, [selectedFilterDate, selectedCalendarDate, allTimeEntries, projectId]);
+
+  // ✅ FIX 3: Monthly total based on selectedFilterDate (if present)
+  const getSelectedMonthTotal = useCallback(() => {
+    const referenceDate = selectedFilterDate
+      ? new Date(selectedFilterDate)
+      : selectedCalendarDate;
+
+    const startOfMonth = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), 1);
+    startOfMonth.setHours(0, 0, 0, 0);
+    const endOfMonth = new Date(referenceDate.getFullYear(), referenceDate.getMonth() + 1, 1);
+    endOfMonth.setHours(0, 0, 0, 0);
+
+    return allTimeEntries
+      .filter((entry) => entry.projectId === projectId)
+      .reduce((sum, entry) => {
+        if (entry.clockInTime && entry.clockOutTime) {
+          const entryTime = entry.clockInTime.getTime();
+          if (entryTime >= startOfMonth.getTime() && entryTime < endOfMonth.getTime()) {
+            return sum + (entry.clockOutTime.getTime() - entry.clockInTime.getTime());
+          }
+        }
+        return sum;
+      }, 0);
+  }, [selectedFilterDate, selectedCalendarDate, allTimeEntries, projectId]);
+
+  const selectedWeekTotal = getSelectedWeekTotal();
+  const selectedMonthTotal = getSelectedMonthTotal();
+
+  // 🔥 The rest of your render logic (calendar, entries list, totals, edit modal) REMAINS THE SAME as before 🔥
+  // ...
   return (
     <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
       <div className="flex items-center justify-between mb-6">
         <button
-          onClick={() => setCurrentView('projects')}
+          onClick={() => { setCurrentView('projects'); setSelectedFilterDate(null); }}
           className="px-4 py-2 bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-gray-200 rounded-md hover:bg-gray-400 dark:hover:bg-gray-700 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50"
         >
           &larr; Back to Projects
         </button>
         <h2 className="text-3xl font-bold text-blue-600 dark:text-blue-400">{projectName}</h2>
-        <div></div> {/* Placeholder for alignment */}
+        <div></div>
       </div>
 
-      {/* Clock In/Out Section */}
       <div className="mb-8 p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700 flex flex-col sm:flex-row items-center justify-center gap-4">
         <span className="text-xl font-medium text-gray-800 dark:text-gray-200">
           Status: <span className={`font-semibold ${clockedIn ? 'text-blue-600' : 'text-red-600'}`}>
@@ -849,7 +1150,7 @@ const ProjectDetail = ({ projectId }) => {
           disabled={!clockedIn}
           className={`px-6 py-3 rounded-md shadow-md transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-opacity-50 ${
             !clockedIn
-              ? 'bg-gray-400 text-gray-700 cursor-not-allowed'
+              ? 'bg-gray-400 text-gray-700 dark:text-gray-700 cursor-not-allowed'
               : 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-500'
           }`}
         >
@@ -857,7 +1158,6 @@ const ProjectDetail = ({ projectId }) => {
         </button>
       </div>
 
-      {/* Calendar View */}
       <div className="mb-8 p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
         <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Calendar</h3>
         <div className="flex justify-between items-center mb-4">
@@ -867,7 +1167,7 @@ const ProjectDetail = ({ projectId }) => {
             </svg>
           </button>
           <span className="text-lg font-semibold text-gray-800 dark:text-gray-200">
-            {selectedDate.toLocaleString('default', { month: 'long', year: 'numeric' })}
+            {selectedCalendarDate.toLocaleString('default', { month: 'long', year: 'numeric' })}
           </span>
           <button onClick={goToNextMonth} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-600">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-600 dark:text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -876,52 +1176,77 @@ const ProjectDetail = ({ projectId }) => {
           </button>
         </div>
         <div className="grid grid-cols-7 gap-2 text-center text-sm">
-          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+          {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
             <div key={day} className="font-semibold text-gray-600 dark:text-gray-400">{day}</div>
           ))}
           {calendarDays.map((day, index) => {
             const fullDate = day ? new Date(year, month, day) : null;
-            const dateString = fullDate ? fullDate.toISOString().split('T')[0] : null;
+            const dateString = fullDate ? getLocalDateString(fullDate) : null;
             const isToday = fullDate && fullDate.toDateString() === new Date().toDateString();
-            const dailyTotal = dailyTotals.find(d => d.date === dateString);
+            const isSelected = selectedFilterDate && dateString === selectedFilterDate;
+            const dailyTotal = allTimeEntries.filter(entry => entry.date === dateString && entry.projectId === projectId)
+                                            .reduce((sum, entry) => sum + calculateEntryDuration(entry), 0);
 
             return (
               <div
                 key={index}
-                className={`p-2 rounded-md ${day ? 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600' : 'bg-gray-100 dark:bg-gray-900'} ${isToday ? 'ring-2 ring-blue-500' : ''}`}
+                className={`p-2 rounded-md cursor-pointer ${day ? 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600' : 'bg-gray-100 dark:bg-gray-900'} ${isToday ? 'ring-2 ring-blue-500' : ''} ${isSelected ? 'bg-blue-200 dark:bg-blue-700 ring-2 ring-blue-500' : ''}`}
+                onClick={() => handleDateClick(day)}
               >
                 <span className="font-medium">{day}</span>
-                {dailyTotal && day && (
+                {day && dailyTotal > 0 && (
                   <div className="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                    {formatDuration(dailyTotal.totalDurationMs)}
+                    {formatDuration(dailyTotal)}
                   </div>
                 )}
               </div>
             );
           })}
         </div>
+        {selectedFilterDate && (
+            <div className="text-center mt-4">
+                <button
+                    onClick={() => setSelectedFilterDate(null)}
+                    className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-md hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors duration-200"
+                >
+                    Show All Entries
+                </button>
+            </div>
+        )}
       </div>
 
-      {/* Time Entries List */}
       <div className="mb-8 p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
-        <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Recent Time Entries</h3>
-        {timeEntries.length === 0 ? (
-          <p className="text-center text-gray-500 dark:text-gray-400">No time entries yet for this project.</p>
+        <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">
+            {selectedFilterDate
+              ? `Time Entries for ${selectedFilterDate}`
+              : 'Recent Time Entries'}
+        </h3>
+        {filteredTimeEntries.length === 0 ? (
+          <p className="text-center text-gray-500 dark:text-gray-400">
+            {selectedFilterDate
+              ? `No time entries`
+              : 'No time entries yet for this project.'}
+          </p>
         ) : (
           <ul className="space-y-3">
-            {timeEntries.slice(0, 10).map(entry => ( // Show last 10 entries
+            {filteredTimeEntries.map(entry => (
               <li key={entry.id} className="p-3 bg-white dark:bg-gray-800 rounded-md shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center">
                 <div>
-                  <p className="font-semibold text-gray-800 dark:text-gray-200">Date: {new Date(entry.date).toLocaleDateString()}</p>
+                  <p className="font-semibold text-gray-800 dark:text-gray-200">Date: {getLocalDateString(entry.clockInTime)}</p>
                   <p className="text-sm text-gray-600 dark:text-gray-400">
                     Clock In: {entry.clockInTime ? entry.clockInTime.toLocaleTimeString() : 'N/A'}
                   </p>
                   <p className="text-sm text-gray-600 dark:text-gray-400">
                     Clock Out: {entry.clockOutTime ? entry.clockOutTime.toLocaleTimeString() : 'Still Clocked In'}
                   </p>
+                  {entry.notes && (
+                    <p className="text-sm text-gray-700 dark:text-gray-300 mt-1">
+                      Notes: <span className="italic">{entry.notes}</span>
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2 mt-2 sm:mt-0">
-                    {entry.clockOutTime && ( // Only show edit button if clocked out
+                    {entry.clockOutTime && (
                         <button
                             onClick={() => startEditingTimeEntry(entry)}
                             className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 transition-colors duration-200 shadow-sm focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-opacity-50 text-xs"
@@ -942,18 +1267,16 @@ const ProjectDetail = ({ projectId }) => {
         )}
       </div>
 
-      {/* Summary Section */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Daily Summary */}
         <div className="p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
-          <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Daily Totals</h3>
+          <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Daily Total</h3>
           {dailyTotals.length === 0 ? (
             <p className="text-center text-gray-500 dark:text-gray-400">No daily data.</p>
           ) : (
             <ul className="space-y-2 max-h-48 overflow-y-auto">
               {dailyTotals.map(item => (
                 <li key={item.date} className="flex justify-between text-gray-700 dark:text-gray-300">
-                  <span>{new Date(item.date).toLocaleDateString()}</span>
+                  <span>{item.date}</span>
                   <span className="font-semibold">{formatDuration(item.totalDurationMs)}</span>
                 </li>
               ))}
@@ -961,42 +1284,52 @@ const ProjectDetail = ({ projectId }) => {
           )}
         </div>
 
-        {/* Weekly Summary */}
+        {/* Updated Weekly Total section */}
         <div className="p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
           <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Weekly Totals</h3>
-          {weeklyTotals.length === 0 ? (
+          {selectedWeekTotal <= 0 ? (
             <p className="text-center text-gray-500 dark:text-gray-400">No weekly data.</p>
           ) : (
             <ul className="space-y-2 max-h-48 overflow-y-auto">
-              {weeklyTotals.map(item => (
-                <li key={item.week} className="flex justify-between text-gray-700 dark:text-gray-300">
-                  <span>Week of {new Date(item.week).toLocaleDateString()}</span>
-                  <span className="font-semibold">{formatDuration(item.totalDurationMs)}</span>
-                </li>
-              ))}
+              <li className="flex justify-between text-gray-700 dark:text-gray-300">
+                <span>
+                  Week of {
+                    (() => {
+                      const referenceDate = new Date(selectedFilterDate || selectedCalendarDate);
+                      const dayOfWeek = (referenceDate.getDay() + 6) % 7; // Monday as first day
+                      const monday = new Date(referenceDate);
+                      monday.setDate(referenceDate.getDate() - dayOfWeek);
+                      return monday.toLocaleDateString('en-US', {
+                        month: 'numeric',
+                        day: 'numeric',
+                        year: 'numeric'
+                      });
+                    })()
+                  }
+                </span>
+                <span className="font-semibold">{formatDuration(selectedWeekTotal)}</span>
+              </li>
             </ul>
           )}
         </div>
 
-        {/* Monthly Summary */}
+        {/* Updated Monthly Total section */}
         <div className="p-4 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-700">
           <h3 className="text-xl font-medium mb-4 text-gray-800 dark:text-gray-200">Monthly Totals</h3>
-          {monthlyTotals.length === 0 ? (
+          {selectedMonthTotal <= 0 ? (
             <p className="text-center text-gray-500 dark:text-gray-400">No monthly data.</p>
           ) : (
             <ul className="space-y-2 max-h-48 overflow-y-auto">
-              {monthlyTotals.map(item => (
-                <li key={item.month} className="flex justify-between text-gray-700 dark:text-gray-300">
-                  <span>{new Date(item.month + '-01').toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
-                  <span className="font-semibold">{formatDuration(item.totalDurationMs)}</span>
-                </li>
-              ))}
+              <li className="flex justify-between text-gray-700 dark:text-gray-300">
+                <span>{new Date(selectedFilterDate || selectedCalendarDate)
+                  .toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</span>
+                <span className="font-semibold">{formatDuration(selectedMonthTotal)}</span>
+              </li>
             </ul>
           )}
         </div>
       </div>
 
-      {/* Edit Time Entry Modal */}
       {showEditTimeEntryModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl max-w-md w-full">
@@ -1013,7 +1346,7 @@ const ProjectDetail = ({ projectId }) => {
                 className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div className="mb-6">
+            <div className="mb-4">
               <label htmlFor="editClockOut" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-2">
                 Clock Out:
               </label>
@@ -1025,6 +1358,19 @@ const ProjectDetail = ({ projectId }) => {
                 className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-blue-500"
               />
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Leave blank if still clocked in.</p>
+            </div>
+            <div className="mb-6">
+              <label htmlFor="editNotes" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-2">
+                Notes:
+              </label>
+              <textarea
+                id="editNotes"
+                value={editingTimeEntryNotes}
+                onChange={(e) => setEditingTimeEntryNotes(e.target.value)}
+                placeholder="Add notes for this time entry..."
+                rows="3"
+                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-gray-200 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-blue-500"
+              ></textarea>
             </div>
             <div className="flex justify-end space-x-3">
               <button
