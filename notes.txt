@@ -1,0 +1,67 @@
+run instructions - 
+
+on local device (vscode terminal):
+1. git add .
+2. git commit -m ""
+3. git push origin main 
+4. npm run deploy 
+- first 3 steps only update the repo, but to update the hosting gh page, we need to deploy on local
+
+
+Full Automation (GitHub Actions)
+Switch to a GitHub Actions workflow so it builds & deploys every time you push to main:
+Delete your gh-pages manual deployment step (optional but cleaner).
+Add a file: .github/workflows/deploy.yml:
+
+""
+name: Deploy React App to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build project
+        run: npm run build
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build
+""          
+
+
+on local host:
+1. npm start
+
+
+initial stuff:
+npx create-react-app time-tracker-app
+cd time-tracker-app
+
+npm cache clean --force
+rm -rf node_modules
+rm package-lock.json
+npm install firebase tailwindcss postcss autoprefixer
+npx tailwindcss init -p   -> doesnt work?
+npm install tailwindcss @tailwindcss/cli  -> ???
+./node_modules/.bin/tailwindcss init -p
+
+
+- using firebase
