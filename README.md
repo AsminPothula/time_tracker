@@ -2,12 +2,10 @@
 
 A simple and intuitive personal time tracker application designed for personal use. Track your time efficiently across different projects and gain insights into your work patterns.
 
-## 🚀 Use it here!
-[**Launch the Time Tracker App**](https://asminpothula.github.io/time_tracker/)
+## Use it here!
+[**Time Tracker App**](https://asminpothula.github.io/time_tracker/)
 
----
-
-## ✨ Features
+## Features
 
 - **User Authentication:** Secure login and sign-up with email and password.
 
